@@ -50,12 +50,12 @@ ITEMS = [
     dict(db="환율", name="USD/JPY", src=("yf", "JPY=X")),
     dict(db="환율", name="USD/KRW", src=("yf", "KRW=X")),
     # 시장 심리 지수
-    dict(db="시장 심리 지수", name="Fear & Greed", src=("fng",)),
+    # Fear & Greed는 CNN이 자동 접근을 막아(418) 제외 → 노션에 수동 입력
     dict(db="시장 심리 지수", name="VIX", src=("yf", "^VIX")),
     # M2
-    dict(db="M2", name="미국 M2", src=("fred", "WM2NS"), freq="W"),
+    dict(db="M2", name="미국 M2", src=("fred", "M2SL"), freq="M"),
     dict(db="M2", name="역레포 잔액", src=("fred", "RRPONTSYD")),
-    dict(db="M2", name="한국 M2", src=("ecos", "101Y004", "M", ["M2", "평잔", "원계열"]), freq="M"),
+    dict(db="M2", name="한국 M2", src=("ecos_find", ["M2"], "M", ["M2", "평잔", "원계열"]), freq="M"),
     # 원자재
     dict(db="원자재", name="금", src=("yf", "GC=F")),
     dict(db="원자재", name="원유(WTI)", src=("yf", "CL=F")),
@@ -68,7 +68,8 @@ ITEMS = [
     dict(db="국채금리", name="한국 10년물", src=("ecos", "817Y002", "D", ["국고채", "10년"]), kind="diff"),
     # 기준금리 (%)
     dict(db="기준금리", name="미국", src=("fred", "DFEDTARU"), kind="diff"),
-    dict(db="기준금리", name="일본", src=("fred", "IRSTCB01JPM156N"), kind="diff", freq="M"),
+    dict(db="기준금리", name="일본", src=("fred_any", ["IRSTCB01JPM156N", "INTDSRJPM193N", "IRSTCI01JPM156N", "IR3TIB01JPM156N"]),
+         kind="diff", freq="M"),
     dict(db="기준금리", name="한국", src=("ecos", "722Y001", "D", ["기준금리"]), kind="diff"),
 ]
 
@@ -133,6 +134,43 @@ def s_ecos(stat, cycle, keywords):
     return pd.Series([float(r["DATA_VALUE"]) for r in rows], index=idx)
 
 
+def s_fred_any(ids):
+    """여러 FRED 시리즈 중 최근 데이터가 있는 첫 번째를 사용."""
+    for i in ids:
+        try:
+            s = s_fred(i)
+            s = s[s.index <= AS_OF]
+            if len(s) and (AS_OF - s.index[-1]).days <= 100:
+                print(f"   (FRED 사용: {i})")
+                return s
+            print(f"   (FRED {i}: 최근 데이터 없음, 다음 시도)")
+        except Exception as e:
+            print(f"   (FRED {i}: 실패 {e})")
+    raise ValueError(f"최근 데이터가 있는 FRED 시리즈 없음: {ids}")
+
+
+def s_ecos_find(table_kw, cycle, item_kw):
+    """ECOS에서 이름으로 통계표를 찾아, 최근 데이터가 있는 첫 표를 사용."""
+    base = f"https://ecos.bok.or.kr/api/%s/{ECOS_KEY}/json/kr/1/10000"
+    resp = requests.get(f"{base % 'StatisticTableList'}/", timeout=30).json()
+    if "StatisticTableList" not in resp:
+        raise ValueError(f"ECOS 표 목록 오류: {resp}")
+    tables = [t for t in resp["StatisticTableList"]["row"]
+              if t.get("CYCLE") == cycle and t.get("SRCH_YN") != "N"
+              and all(k in t["STAT_NAME"] for k in table_kw)]
+    tried = []
+    for t in tables[:15]:
+        try:
+            s = s_ecos(t["STAT_CODE"], cycle, item_kw)
+            if len(s) and (AS_OF - s.index.max()).days <= 100:
+                print(f"   (ECOS 표 사용: {t['STAT_CODE']} {t['STAT_NAME']})")
+                return s
+        except Exception:
+            pass
+        tried.append(f"{t['STAT_CODE']} {t['STAT_NAME']}")
+    raise ValueError(f"ECOS에서 최근 데이터를 찾지 못함. 시도한 표: {tried}")
+
+
 def s_fng():
     url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{START.date().isoformat()}"
     hdr = {**UA, "Referer": "https://www.cnn.com/markets/fear-and-greed",
@@ -147,7 +185,8 @@ def s_fng():
 
 def load(item):
     kind, *a = item["src"]
-    s = {"yf": s_yf, "fred": s_fred, "tsy": s_tsy, "ecos": s_ecos, "fng": s_fng}[kind](*a)
+    s = {"yf": s_yf, "fred": s_fred, "fred_any": s_fred_any, "tsy": s_tsy,
+         "ecos": s_ecos, "ecos_find": s_ecos_find, "fng": s_fng}[kind](*a)
     return 1 / s if item.get("invert") else s
 
 
@@ -189,22 +228,40 @@ def ok(r):
         raise RuntimeError(f"{r.status_code} {r.text[:300]}")
 
 
+_schema, _warned = {}, set()
+
+
+def schema(db):
+    if db not in _schema:
+        r = requests.get(f"https://api.notion.com/v1/databases/{db}", headers=H, timeout=30)
+        ok(r)
+        _schema[db] = r.json()["properties"]
+    return _schema[db]
+
+
 def upsert(item, d):
     db, name, date = DB_IDS[item["db"]], item["name"], AS_OF.date().isoformat()
+    sch = schema(db)
+    title_prop = next(k for k, v in sch.items() if v["type"] == "title")
+    if sch.get(P_DATE, {}).get("type") != "date":
+        raise ValueError(f"날짜 속성 '{P_DATE}' 없음. 이 DB 속성: { {k: v['type'] for k, v in sch.items()} }")
     props = {
-        P_TITLE: {"title": [{"text": {"content": name}}]},
-        P_PRICE: {"number": d["price"]},
+        title_prop: {"title": [{"text": {"content": name}}]},
         P_DATE: {"date": {"start": date}},
-        P_YEAR: {"number": d["year"]},
-        P_DAY: {"number": d["day"]},
-        P_WEEK: {"number": d["week"]},
     }
-    if GROUP_PROP:
+    for prop, key in ((P_PRICE, "price"), (P_YEAR, "year"), (P_DAY, "day"), (P_WEEK, "week")):
+        if sch.get(prop, {}).get("type") == "number":
+            props[prop] = {"number": d[key]}
+        elif (item["db"], prop) not in _warned:
+            _warned.add((item["db"], prop))
+            print(f"   ! [{item['db']}] 숫자 속성 '{prop}' 없음 → 건너뜀. 이 DB 속성: "
+                  f"{ {k: v['type'] for k, v in sch.items()} }")
+    if GROUP_PROP and GROUP_PROP[0] in sch:
         props[GROUP_PROP[0]] = {GROUP_PROP[1]: {"name": name}}
     q = requests.post(
         f"https://api.notion.com/v1/databases/{db}/query", headers=H, timeout=30,
         json={"filter": {"and": [
-            {"property": P_TITLE, "title": {"equals": name}},
+            {"property": title_prop, "title": {"equals": name}},
             {"property": P_DATE, "date": {"equals": date}}]}},
     )
     ok(q)
