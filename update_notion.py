@@ -51,14 +51,19 @@ ITEMS = [
     dict(db="주식시장", name="KOSPI", src=("yf", "^KS11")),
     dict(db="주식시장", name="Nasdaq", src=("yf", "^IXIC")),
     dict(db="주식시장", name="S&P500", src=("yf", "^GSPC")),
+    dict(db="주식시장", name="다우존스", src=("yf", "^DJI")),
     # 환율 (USD/X = 1달러당 X)
     dict(db="환율", name="달러 인덱스", src=("yf", "DX-Y.NYB")),
     dict(db="환율", name="USD/EUR", src=("yf", "EURUSD=X"), invert=True),
     dict(db="환율", name="USD/JPY", src=("yf", "JPY=X")),
     dict(db="환율", name="USD/KRW", src=("yf", "KRW=X")),
+    dict(db="환율", name="CNY/USD", src=("yf", "CNYUSD=X")),      # 1위안당 달러
+    dict(db="환율", name="JPY/KRW", src=("yf", "JPYKRW=X")),      # 1엔당 원
     # 시장 심리 지수
     # Fear & Greed는 CNN이 자동 접근을 막아(418) 제외 → 노션에 수동 입력
-    dict(db="시장 심리 지수", name="VIX(뉴욕주식시작 변동성지수)", src=("yf", "^VIX")),
+    dict(db="시장 심리 지수", name="VIX(뉴욕주식시장 변동성지수)", src=("yf", "^VIX")),
+    dict(db="시장 심리 지수", name="SKEW 지수", src=("yf", "^SKEW")),
+    dict(db="시장 심리 지수", name="하이일드 스프레드", src=("fred", "BAMLH0A0HYM2"), kind="diff"),
     # M2
     dict(db="M2", name="미국 M2", src=("fred", "M2SL"), freq="M"),
     dict(db="M2", name="역레포 잔액", src=("fred", "RRPONTSYD")),
@@ -67,10 +72,13 @@ ITEMS = [
     dict(db="원자재", name="금 선물", src=("yf", "GC=F")),
     dict(db="원자재", name="원유(WTI 선물)", src=("yf", "CL=F")),
     dict(db="원자재", name="은", src=("yf", "SI=F")),
+    dict(db="원자재", name="구리", src=("yf", "HG=F")),
     # 국채금리 (%)
     dict(db="국채금리", name="미국 3년물", src=("tsy", "3 Yr"), kind="diff"),
     dict(db="국채금리", name="미국 10년물", src=("tsy", "10 Yr"), kind="diff"),
     dict(db="국채금리", name="미국 30년물", src=("tsy", "30 Yr"), kind="diff"),
+    dict(db="국채금리", name="미국 2년물", src=("tsy", "2 Yr"), kind="diff"),
+    dict(db="국채금리", name="미국 장단기 스프레드", src=("tsy_spread", "10 Yr", "2 Yr"), kind="diff"),  # 10년-2년
     dict(db="국채금리", name="한국 3년물", src=("ecos", "817Y002", "D", ["국고채", "3년"]), kind="diff"),
     dict(db="국채금리", name="한국 10년물", src=("ecos", "817Y002", "D", ["국고채", "10년"]), kind="diff"),
     dict(db="국채금리", name="한국 30년물", src=("ecos", "817Y002", "D", ["국고채", "30년"]), kind="diff"),
@@ -121,6 +129,10 @@ def s_tsy(col):
         df["Date"] = pd.to_datetime(df["Date"])
         _tsy = df.set_index("Date").sort_index()
     return _tsy[col].dropna()
+
+
+def s_tsy_spread(long_col, short_col):
+    return (s_tsy(long_col) - s_tsy(short_col)).dropna()
 
 
 def s_ecos(stat, cycle, keywords):
@@ -193,7 +205,7 @@ def s_fng():
 
 def load(item):
     kind, *a = item["src"]
-    s = {"yf": s_yf, "fred": s_fred, "fred_any": s_fred_any, "tsy": s_tsy,
+    s = {"yf": s_yf, "fred": s_fred, "fred_any": s_fred_any, "tsy": s_tsy, "tsy_spread": s_tsy_spread,
          "ecos": s_ecos, "ecos_find": s_ecos_find, "fng": s_fng}[kind](*a)
     return 1 / s if item.get("invert") else s
 
