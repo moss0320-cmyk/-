@@ -50,22 +50,22 @@ ITEMS = [
     # 주식시장
     dict(db="주식시장", name="KOSPI", src=("yf", "^KS11")),
     dict(db="주식시장", name="Nasdaq", src=("yf", "^IXIC")),
-    dict(db="주식시장", name="S&P 500", src=("yf", "^GSPC")),
+    dict(db="주식시장", name="S&P500", src=("yf", "^GSPC")),
     # 환율 (USD/X = 1달러당 X)
-    dict(db="환율", name="달러인덱스", src=("yf", "DX-Y.NYB")),
+    dict(db="환율", name="달러 인덱스", src=("yf", "DX-Y.NYB")),
     dict(db="환율", name="USD/EUR", src=("yf", "EURUSD=X"), invert=True),
     dict(db="환율", name="USD/JPY", src=("yf", "JPY=X")),
     dict(db="환율", name="USD/KRW", src=("yf", "KRW=X")),
     # 시장 심리 지수
     # Fear & Greed는 CNN이 자동 접근을 막아(418) 제외 → 노션에 수동 입력
-    dict(db="시장 심리 지수", name="VIX", src=("yf", "^VIX")),
+    dict(db="시장 심리 지수", name="VIX(뉴욕주식시작 변동성지수)", src=("yf", "^VIX")),
     # M2
     dict(db="M2", name="미국 M2", src=("fred", "M2SL"), freq="M"),
     dict(db="M2", name="역레포 잔액", src=("fred", "RRPONTSYD")),
     dict(db="M2", name="한국 M2", src=("ecos_find", ["M2"], "M", ["M2", "평잔", "원계열"]), freq="M"),
     # 원자재
-    dict(db="원자재", name="금", src=("yf", "GC=F")),
-    dict(db="원자재", name="원유(WTI)", src=("yf", "CL=F")),
+    dict(db="원자재", name="금 선물", src=("yf", "GC=F")),
+    dict(db="원자재", name="원유(WTI 선물)", src=("yf", "CL=F")),
     dict(db="원자재", name="은", src=("yf", "SI=F")),
     # 국채금리 (%)
     dict(db="국채금리", name="미국 3년물", src=("tsy", "3 Yr"), kind="diff"),
