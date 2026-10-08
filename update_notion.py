@@ -26,10 +26,17 @@ ECOS_KEY = os.environ.get("ECOS_API_KEY", "")
 UA = {"User-Agent": "Mozilla/5.0"}
 
 # ── 노션 속성 이름 (DB와 다르면 수정) ─────────────────
-P_TITLE, P_PRICE, P_DATE = "지수/종목", "가격/포인트", "기준일"
-P_YEAR, P_DAY, P_WEEK = "연간 변동", "일간 변동", "주간 변동"
+P_DATE = "기준일"
+# DB마다 열 이름이 다르면 앞에서부터 먼저 발견되는 이름을 사용
+PROP_NAMES = {
+    "price": ["가격/포인트", "금리", "포인트"],
+    "year": ["연간 변동"],
+    "day": ["일간 변동"],
+    "week": ["주간 변동"],
+    "last_change": ["변동폭"],   # 기준금리: 직전 금리 변경 폭(%p)
+}
 GROUP_PROP = None          # 그룹 기준 속성이 있으면 ("속성명", "select")
-PERCENT_FORMAT = True      # 변동 속성이 '퍼센트' 형식이면 True, 일반 숫자면 False
+# (숫자 속성의 '퍼센트/숫자' 형식은 노션 DB에서 자동으로 읽어 맞춥니다)
 # ───────────────────────────────────────────────────
 
 # 기준일: 가장 최근 화요일(KST). 수요일 아침에 돌리면 '어제(화)' 마감 기준이 된다.
@@ -66,6 +73,7 @@ ITEMS = [
     dict(db="국채금리", name="미국 30년물", src=("tsy", "30 Yr"), kind="diff"),
     dict(db="국채금리", name="한국 3년물", src=("ecos", "817Y002", "D", ["국고채", "3년"]), kind="diff"),
     dict(db="국채금리", name="한국 10년물", src=("ecos", "817Y002", "D", ["국고채", "10년"]), kind="diff"),
+    dict(db="국채금리", name="한국 30년물", src=("ecos", "817Y002", "D", ["국고채", "30년"]), kind="diff"),
     # 기준금리 (%)
     dict(db="기준금리", name="미국", src=("fred", "DFEDTARU"), kind="diff"),
     dict(db="기준금리", name="일본", src=("fred_any", ["IRSTCB01JPM156N", "INTDSRJPM193N", "IRSTCI01JPM156N", "IR3TIB01JPM156N"]),
@@ -207,10 +215,11 @@ def compute(item, s):
     def chg(p):
         if p is None or (kind == "pct" and p == 0):
             return None
-        v = (last / p - 1) if kind == "pct" else (last - p) / 100   # 금리는 %p
-        return round(v if PERCENT_FORMAT else v * 100, 4)
+        return round((last / p - 1) * 100 if kind == "pct" else last - p, 4)   # %, 금리는 %p
 
+    other = s[s != last]
     return {
+        "last_change": round(last - float(other.iloc[-1]), 4) if len(other) else 0.0,
         "price": round(last, 4),
         "day": chg(float(s.iloc[-2])) if freq == "D" and len(s) > 1 else None,
         "week": chg(past(7)) if freq in ("D", "W") else None,
@@ -239,6 +248,30 @@ def schema(db):
     return _schema[db]
 
 
+def pick(sch, key):
+    """이 DB에서 실제로 존재하는 속성 이름 찾기."""
+    return next((n for n in PROP_NAMES[key] if n in sch), None)
+
+
+def build_value(sch_prop, val, kind_label, is_rate_level=False):
+    """속성 유형(숫자/텍스트/선택)에 맞춰 값을 변환."""
+    t = sch_prop["type"]
+    if t == "number":
+        if val is not None and (sch_prop["number"].get("format") == "percent") and (kind_label or is_rate_level):
+            val = val / 100            # 퍼센트 형식 속성은 0.0455 = 4.55%
+        return {"number": val}
+    label = None if val is None else (
+        f"{val:,.2f}%" if is_rate_level else
+        f"{val:,.2f}" if kind_label is None else f"{val:+.2f}{kind_label}")
+    if t == "rich_text":
+        return {"rich_text": [{"text": {"content": label}}] if label else []}
+    if t == "multi_select":
+        return {"multi_select": [{"name": label}] if label else []}
+    if t == "select":
+        return {"select": {"name": label} if label else None}
+    return None
+
+
 def upsert(item, d):
     db, name, date = DB_IDS[item["db"]], item["name"], AS_OF.date().isoformat()
     sch = schema(db)
@@ -249,13 +282,28 @@ def upsert(item, d):
         title_prop: {"title": [{"text": {"content": name}}]},
         P_DATE: {"date": {"start": date}},
     }
-    for prop, key in ((P_PRICE, "price"), (P_YEAR, "year"), (P_DAY, "day"), (P_WEEK, "week")):
-        if sch.get(prop, {}).get("type") == "number":
-            props[prop] = {"number": d[key]}
-        elif (item["db"], prop) not in _warned:
-            _warned.add((item["db"], prop))
-            print(f"   ! [{item['db']}] 숫자 속성 '{prop}' 없음 → 건너뜀. 이 DB 속성: "
-                  f"{ {k: v['type'] for k, v in sch.items()} }")
+    rate = item.get("kind") == "diff"
+    unit = "%p" if rate else "%"
+    for key in ("price", "year", "day", "week", "last_change"):
+        if key == "last_change" and not rate:
+            continue
+        prop = pick(sch, key)
+        if prop is None and key == "last_change":
+            continue
+        if prop is None:
+            if (item["db"], key) not in _warned:
+                _warned.add((item["db"], key))
+                print(f"   ! [{item['db']}] '{key}'에 해당하는 열 없음 → 건너뜀. 이 DB 속성: "
+                      f"{ {k: v['type'] for k, v in sch.items()} }")
+            continue
+        if key == "price":
+            v = build_value(sch[prop], d["price"], "%" if rate else None, is_rate_level=rate)
+        else:
+            v = build_value(sch[prop], d[key], unit)
+        if v is None:
+            print(f"   ! [{item['db']}] 열 '{prop}' 유형({sch[prop]['type']})은 지원 안 함 → 건너뜀")
+            continue
+        props[prop] = v
     if GROUP_PROP and GROUP_PROP[0] in sch:
         props[GROUP_PROP[0]] = {GROUP_PROP[1]: {"name": name}}
     q = requests.post(
