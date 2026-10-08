@@ -125,14 +125,22 @@ def s_ecos(stat, cycle, keywords):
     print(f"   (ECOS 매칭: {item['ITEM_NAME']} / {item['ITEM_CODE']})")
     fmt = "%Y%m%d" if cycle == "D" else "%Y%m"
     url = f"{base % 'StatisticSearch'}/{stat}/{cycle}/{START.strftime(fmt)}/{AS_OF.strftime(fmt)}/{item['ITEM_CODE']}"
-    rows = requests.get(url, timeout=30).json()["StatisticSearch"]["row"]
+    resp = requests.get(url, timeout=30).json()
+    if "StatisticSearch" not in resp:
+        raise ValueError(f"ECOS 응답 오류: {resp}")
+    rows = resp["StatisticSearch"]["row"]
     idx = [pd.to_datetime(r["TIME"], format="%Y%m%d" if len(r["TIME"]) == 8 else "%Y%m") for r in rows]
     return pd.Series([float(r["DATA_VALUE"]) for r in rows], index=idx)
 
 
 def s_fng():
     url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{START.date().isoformat()}"
-    data = requests.get(url, headers=UA, timeout=30).json()["fear_and_greed_historical"]["data"]
+    hdr = {**UA, "Referer": "https://www.cnn.com/markets/fear-and-greed",
+           "Origin": "https://www.cnn.com"}
+    r = requests.get(url, headers=hdr, timeout=30)
+    if r.status_code != 200:
+        raise ValueError(f"CNN 응답 {r.status_code} (서버에서 차단됐을 수 있음)")
+    data = r.json()["fear_and_greed_historical"]["data"]
     s = pd.Series([d["y"] for d in data], index=pd.to_datetime([d["x"] for d in data], unit="ms").normalize())
     return s[~s.index.duplicated(keep="last")]
 
@@ -146,8 +154,12 @@ def load(item):
 # ── 변동률 계산 ──────────────────────────────────
 def compute(item, s):
     s = s[s.index <= AS_OF].dropna().sort_index()
+    if s.empty:
+        raise ValueError("데이터 없음")
     last_date, last = s.index[-1], float(s.iloc[-1])
     kind, freq = item.get("kind", "pct"), item.get("freq", "D")
+    if (AS_OF - last_date).days > {"D": 10, "W": 25, "M": 100}[freq]:
+        raise ValueError(f"데이터가 오래됨 (최신 {last_date.date()})")
 
     def past(days):
         sub = s[: last_date - timedelta(days=days)]
@@ -172,6 +184,11 @@ H = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28",
      "Content-Type": "application/json"}
 
 
+def ok(r):
+    if not r.ok:
+        raise RuntimeError(f"{r.status_code} {r.text[:300]}")
+
+
 def upsert(item, d):
     db, name, date = DB_IDS[item["db"]], item["name"], AS_OF.date().isoformat()
     props = {
@@ -190,7 +207,7 @@ def upsert(item, d):
             {"property": P_TITLE, "title": {"equals": name}},
             {"property": P_DATE, "date": {"equals": date}}]}},
     )
-    q.raise_for_status()
+    ok(q)
     found = q.json()["results"]
     if found:   # 같은 주 재실행 시 중복 생성 방지
         r = requests.patch(f"https://api.notion.com/v1/pages/{found[0]['id']}",
@@ -198,7 +215,7 @@ def upsert(item, d):
     else:
         r = requests.post("https://api.notion.com/v1/pages", headers=H, timeout=30,
                           json={"parent": {"database_id": db}, "properties": props})
-    r.raise_for_status()
+    ok(r)
 
 
 if __name__ == "__main__":
