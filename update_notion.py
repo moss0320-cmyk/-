@@ -135,9 +135,32 @@ def s_tsy_spread(long_col, short_col):
     return (s_tsy(long_col) - s_tsy(short_col)).dropna()
 
 
+_ecos_down = False
+
+
+def ecos_get(url, tries=5):
+    """한국은행 서버가 해외(GitHub 서버)에서 가끔 응답이 늦어 끊기므로, 간격을 늘려가며 다시 시도."""
+    import time
+    global _ecos_down
+    if _ecos_down:   # 이번 실행에서 이미 완전히 실패했으면 시간 낭비 없이 바로 건너뜀
+        raise ConnectionError("ECOS 서버 응답 없음 (앞선 항목에서 재시도 모두 실패)")
+    for n in range(tries):
+        try:
+            r = requests.get(url, timeout=(60, 120))
+            r.raise_for_status()
+            return r.json()
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+            if n == tries - 1:
+                _ecos_down = True
+                raise
+            wait = 20 * (n + 1)
+            print(f"   (ECOS 연결 실패, {wait}초 후 재시도 {n + 1}/{tries - 1}: {type(e).__name__})")
+            time.sleep(wait)
+
+
 def s_ecos(stat, cycle, keywords):
     base = f"https://ecos.bok.or.kr/api/%s/{ECOS_KEY}/json/kr/1/100000"
-    items = requests.get(f"{base % 'StatisticItemList'}/{stat}", timeout=30).json()["StatisticItemList"]["row"]
+    items = ecos_get(f"{base % 'StatisticItemList'}/{stat}")["StatisticItemList"]["row"]
     hit = [i for i in items if all(k in i["ITEM_NAME"] for k in keywords)]
     if not hit:
         names = [i["ITEM_NAME"] for i in items][:30]
@@ -146,7 +169,7 @@ def s_ecos(stat, cycle, keywords):
     print(f"   (ECOS 매칭: {item['ITEM_NAME']} / {item['ITEM_CODE']})")
     fmt = "%Y%m%d" if cycle == "D" else "%Y%m"
     url = f"{base % 'StatisticSearch'}/{stat}/{cycle}/{START.strftime(fmt)}/{AS_OF.strftime(fmt)}/{item['ITEM_CODE']}"
-    resp = requests.get(url, timeout=30).json()
+    resp = ecos_get(url)
     if "StatisticSearch" not in resp:
         raise ValueError(f"ECOS 응답 오류: {resp}")
     rows = resp["StatisticSearch"]["row"]
@@ -172,7 +195,7 @@ def s_fred_any(ids):
 def s_ecos_find(table_kw, cycle, item_kw):
     """ECOS에서 이름으로 통계표를 찾아, 최근 데이터가 있는 첫 표를 사용."""
     base = f"https://ecos.bok.or.kr/api/%s/{ECOS_KEY}/json/kr/1/10000"
-    resp = requests.get(f"{base % 'StatisticTableList'}/", timeout=30).json()
+    resp = ecos_get(f"{base % 'StatisticTableList'}/")
     if "StatisticTableList" not in resp:
         raise ValueError(f"ECOS 표 목록 오류: {resp}")
     tables = [t for t in resp["StatisticTableList"]["row"]
